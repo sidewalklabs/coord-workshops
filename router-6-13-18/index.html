@@ -27,7 +27,7 @@
 
 // Your Coord API key.
 var COORD_API_KEY = '$API_KEY';
-var ROUTING_API_URL = 'https://api.coord.co/v1/routing';
+var ROUTING_API_URL = 'https://api.coord.co/v1/routing/route';
 var NY_CENTER = {lat: 40.7301, lng: -73.9937};
 
 /******************************************** Globals ********************************************/
@@ -35,6 +35,8 @@ var NY_CENTER = {lat: 40.7301, lng: -73.9937};
 var map;                // google.maps.Map object we render on.
 var origin = null;      // google.maps.LatLng object of the origin.
 var destination = null; // google.maps.LatLng object of the destination.
+
+var colors = ['#F44336', '#673AB7', '#3F51B5', '#2196F3', '#00BCD4', '#009688', '#4CAF50', '#FF5722'];
 
 // Element selectors.
 var headlineElement = document.getElementById('headline');
@@ -78,6 +80,24 @@ function addFeature(latLng) {
   map.data.add(feature);
 }
 
+/** Creates GeoJSON out of a lat/lng. */
+function toGeoJSON(geometry) {
+  return {
+    type: 'Feature',
+    geometry: geometry,
+  };
+}
+
+/** Renders trips (output of Coord Routing API) on the map. */
+function renderTrips(trips) {
+  trips.forEach(function(trip) {
+    trip.legs.forEach(function(leg, i) {
+      var feature = map.data.addGeoJson(toGeoJSON(leg.geometry));
+      map.data.overrideStyle(feature[0], {strokeColor: colors[i%colors.length]});
+    });
+  });
+}
+
 /** Handle a click on the map. */
 function handleMapClick(event) {
   if (!origin) { // Set the origin if it doesn't exist.
@@ -90,6 +110,13 @@ function handleMapClick(event) {
     destination = event.latLng;
     addFeature(event.latLng);
     headlineElement.innerHTML = 'TODO: Call Coord\'s Routing API to get routes and render them!';
+
+    // TODO: Use the getRequest() method above to call Coord's Routing API and render the trips
+    // using the given renderTrips() method.
+    var url = ''; // TODO: Fill in request url.
+    getRequest(url).then(function(response) {
+      // TODO: Render trips.
+    });
 
     // Set the map's bounds to match the origin and destination.
     var bounds = new google.maps.LatLngBounds();
