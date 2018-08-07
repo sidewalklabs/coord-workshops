@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Tolls API Example: Multiple Routing Engines</title>
+    <link rel="stylesheet" type="text/css" href="https://coord.co/styles/fonts.css">
+    <link rel="stylesheet" type="text/css" href="https://coord.co/toll-example/style.css">
+    <meta name="viewport" content="initial-scale=1.0">
+    <meta charset="utf-8">
+    <script src="http://js.api.here.com/v3/3.0/mapsjs-core.js" type="text/javascript" charset="utf-8"></script>
+    <script src="http://js.api.here.com/v3/3.0/mapsjs-service.js" type="text/javascript" charset="utf-8"></script>
+  </head>
+  <body style="overflow: hidden">
+    <div id="map"></div>
+    <div id="info">
+      <div id="headline">Loading...</div>
+      <div id="body" style="overflow-y: scroll; max-height:200px;"></div>
+      <div id="warning"></div>
+      <a id="clear" href="javascript:void(0)" style="margin-left: 16px" onclick="reset()">Clear</a>
+      <hr>
+      <div style="margin-left: 12px">Use router:</div>
+      <div style="margin: 12px 0 12px 24px">
+        <label><input type="radio" checked name="router" onChange="updateRouter()" value="GOOGLE" /> Google</label><br/>
+        <label><input type="radio" name="router" onChange="updateRouter()" value="HERE" /> HERE</label><br/>
+        <label><input type="radio" name="router" onChange="updateRouter()" value="MAPBOX" /> Mapbox</label><br/>
+      </div>
+      <img id="toll-icon" src="https://coord.co/assets/toll-point.png"> Toll Points
+      <div style="padding: 12px">
+        <h3>Incoming Route Response</h3>
+        <pre id="incoming" style="font-size: 10pt; height: 200px; overflow: auto">TODO: Fill me in!</pre>
+        <h3>Outgoing Toll Request</h3>
+        <pre id="outgoing" style="font-size: 10pt; height: 200px; overflow: auto">TODO: Fill me in!</pre>
+      </div>
+    </div>
+    <br/>
+    <script type="text/javascript">
+// *** Constants ***
+
+// Your Coord API key.
+var COORD_API_KEY = 'AIzaSyASISXaEbE3jgv4y3lSBAk4LTZRNA0hEGo';
+
+// Settings for the kind of vehicle to query toll data for.
+// Change these to get results for trucks, motorcycles, or carpools.
+var AXLES = 2;
+var MOTORCYCLE = false;
+var PASSENGERS = 1;
+
+
+// *** Globals ***
+var map;                        // google.maps.Map object we render on.
+var origin = null;              // google.maps.LatLng object representing start of route.
+var destination = null;         // google.maps.LatLng object representing end of route.
+var routePolyline = null;      // The google.maps.Polyline we construct from  route.
+
+var headline = document.getElementById('headline');
+var body = document.getElementById('body');
+var warning = document.getElementById('warning');
+var clearElement = document.getElementById('clear');
+
+var ROUTERS = null;  // Map from router name to routing engine object (see below).
+var currentRouter = null;  // The currently active routing engine.
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// ROUTING ENGINES
+//
+// The purpose of this demo is to show how to use Coord's tolls API with multiple routing engines.
+// We use three: Google, HERE, and Mapbox. Feel free to add more!
+// Note that we render the results on a Google map but you could also use any other maps SDK.
+//
+// We represent each routing engine as a JavaScript object with three functions:
+// * getRoute: call the router to find a route from origin to destination.
+//             Takes a callback to call with its response.
+// * convertResponseToSteps: get the "steps" portion of a Coord tolls API request from the response.
+// * convertResponseToPolyline: construct a google.maps.Polyline from the response (for display).
+//
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/** Google's router object. */
+function GoogleRouter() {
+  this.directionsService = new google.maps.DirectionsService();
+ 
+  this.getRoute = function(cb) {
+    this.directionsService.route(
+      {origin, destination, travelMode: 'DRIVING'},
+      function(response, status) {
+        if (response.routes.length == 0) {
+          cb(null);
+        } else {
+          cb(response);
+        }
+      });
+  };
+
+  this.convertResponseToSteps = function(response) {
+    // Because the tolls API understands Google's encoded polyline format, the request is mostly a
+    // cut-down version of what we got back from Google's Directions Service.
+    return response.routes[0].legs[0].steps.map(function(step) {
+      return {
+        encoded_polyline: step.polyline.points,
+        road_name: step.instructions,
+        duration_s: step.duration.value,
+      };
+    });
+  };
+
+  this.convertResponseToPolyline = function(response) {
+    const path = google.maps.geometry.encoding.decodePath(response.routes[0].overview_polyline);
+    return new google.maps.Polyline({path: path, map: map});
+  };
+}
+
+/** HERE's router object. */
+function HERERouter() {
+  this.platform = new H.service.Platform({
+    'app_id': 'XAmkGjE42tCBpCEKWs8F',
+    'app_code': '7kjL4e034J75M5TFvp8UHQ'
+  });
+  this.router = this.platform.getRoutingService();
+  
+  this.getRoute = function(cb) {
+    this.router.calculateRoute(
+      {mode: 'fastest;car',
+       waypoint0: 'geo!' + origin.lat() + ',' + origin.lng(),
+       waypoint1: 'geo!' + destination.lat() + ',' + destination.lng(),
+       
+       // This representation makes sure that we have the path for every route step.
+       representation: 'display',  
+
+       // Maximum resolution to ensure accuracy.
+       resolution: '1',  
+      },
+      function(response) {
+        if (response.response.route.length == 0) {
+          cb(null);
+        } else {
+          cb(response);
+        }
+      },
+      function(err) {
+        console.error(err);
+        cb(null);
+      });
+  };
+
+  // HERE returns its responses as a list of lat,lng strings, so we need to parse them.
+  var parseLatLng = function(latLngStr) {
+    var parts = latLngStr.split(',');
+    return {lat: parseFloat(parts[0]), lng: parseFloat(parts[1])};
+  };
+    
+  this.convertResponseToSteps = function(response) {
+    // The last maneuver is just the destination, so we convert all the rest into polylines.
+    return response.response.route[0].leg[0].maneuver.slice(0, -1).map(function(step) {
+      return {
+        polyline: step.shape.map(parseLatLng),
+        road_name: step.instruction,
+        duration_s: step.travelTime,
+      };
+    });
+  };
+    
+  this.convertResponseToPolyline = function(response) {
+    var path = [];
+    response.response.route[0].leg[0].maneuver.forEach(function(step) {
+      path = path.concat(step.shape.slice(0, -1).map(parseLatLng));
+    });
+    return new google.maps.Polyline({map: map, path: path});
+  };
+}
+
+/** Mapbox's router object. */
+function MapboxRouter() {
+  this.token = 'pk.eyJ1IjoiZ29pbmdvbml0IiwiYSI6ImNqMHIyZW5wNDAyMWczM253bHJienNmMmQifQ.QfOC5y1FV4aXX6OGHlDvCA';
+
+  this.getRoute = function(cb) {
+    // Note "overview=full" -- this makes sure we get a high-resolution path as part of the
+    // response, ensuring accuracy.
+    fetch(
+      'https://api.mapbox.com/directions/v5/mapbox/driving/' +
+      origin.lng() + ',' + origin.lat() + ';' +
+      destination.lng() + ',' + destination.lat() + 
+      '?overview=full&access_token=' + this.token)
+    .then(function(response) {
+      return response.json();
+    })
+    .then(function(response) {
+      if (response.routes.length == 0) {
+        cb(null);
+      } else {
+        cb(response);
+      }
+    });
+  };
+
+  this.convertResponseToSteps = function(response) {
+    // Mapbox uses the same encoded polyline format as Google, but we don't have the geometry
+    // divided into steps. That's OK: the tolls API can just take all the geometry as a single step.
+    return [{
+      encoded_polyline: response.routes[0].geometry
+    }];
+  };
+
+  this.convertResponseToPolyline = function(response) {
+    var path = google.maps.geometry.encoding.decodePath(response.routes[0].geometry);
+    return new google.maps.Polyline({map: map, path: path});
+  };
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// ROUTER-AGNOSTIC CODE
+//
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/** Initialize the map (called on load). */
+function initMap() {
+  // Show the New York area on the map.
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: {lat: 40.751501, lng: -73.977834},
+    zoom: 10,
+    styles: customMapStyles,
+    fullscreenControl: false,
+    mapTypeControl: false,
+  });
+  map.addListener('click', handleClick);
+
+  // Style toll locations (we override below for origin, destination, and selected tolls).
+  map.data.setStyle({
+    zIndex: 0,
+    icon: {
+      url:"https://coord.co/assets/toll-point.png",
+      scaledSize: new google.maps.Size(12, 12),
+    },
+  });
+
+  ROUTERS = {
+    GOOGLE: new GoogleRouter(),
+    HERE: new HERERouter(),
+    MAPBOX: new MapboxRouter(),
+  };
+  currentRouter = ROUTERS.GOOGLE;
+
+  fetchAllTollLocations().then(renderTollLocations);
+  // Initialize globals and UI.
+  reset();
+}
+
+/** Handle a click on the map. */
+function handleClick(evt) {
+  clearElement.style.display = 'block';
+  if (!origin) {
+    // If there's no origin yet, set the origin at the click point.
+    origin = evt.latLng;
+
+    var originFeature = new google.maps.Data.Feature({geometry: origin, id: 'origin'});
+    map.data.add(originFeature);
+    map.data.overrideStyle(originFeature, {
+      zIndex: 2,
+      icon: {
+        url: 'https://coord.co/assets/pin-origin.png',
+        scaledSize: new google.maps.Size(32, 48),
+      }});
+    headline.innerHTML = 'Click on the map to choose your destination.';
+  } else if (!destination) {
+    // If there's no destination, set the destination at the click point.
+    destination = evt.latLng;
+
+    var destinationFeature = new google.maps.Data.Feature({geometry: destination, id: 'destination'});
+    map.data.add(destinationFeature);
+    map.data.overrideStyle(destinationFeature, {
+      zIndex: 2,
+      icon: {
+        url: 'https://coord.co/assets/pin-destination.png',
+        scaledSize: new google.maps.Size(32, 48),
+      }});
+
+    // Start computing!
+    computeRouteAndTolls();
+  }
+}
+
+/** Change the routing engine we are using. */
+function updateRouter() {
+  document.getElementsByName('router').forEach(function(b) {
+    if (b.checked) {
+      currentRouter = ROUTERS[b.value];
+    }
+  });
+  if (routePolyline) {
+    routePolyline.setMap(null);
+  }
+  map.data.forEach(function(feature) {
+      if (feature.getId().includes('toll')) {
+        map.data.revertStyle(feature);
+      }
+  });
+
+  // Recompute the current route if an origin and destination are both set.
+  if (origin && destination) {
+    computeRouteAndTolls();
+  }
+}
+
+/** Compute the route and tolls based on the current origin and destination. */
+function computeRouteAndTolls() {
+  headline.innerHTML = 'Loading...';
+
+  currentRouter.getRoute(function(route) {
+    // *TODO*: JSON.stringify route and put it into document.getElementById('incoming')
+
+    if (!route) {
+      headline.innerHTML = 'Clear and select again.';
+      warning.innerHTML = 'No route found.';
+      warning.style.display = 'block';
+      return;
+    }
+    routePolyline = currentRouter.convertResponseToPolyline(route);
+    runTollRequest(currentRouter.convertResponseToSteps(route));
+  });
+}
+
+/**
+ * Call the tolls API to get tolls for a given route.
+ * Returns a Promise with the response.
+ */
+function runTollRequest(steps) {
+  var requestBody = {
+    departure_time: new Date().toISOString(),
+    steps: steps,
+
+    // Add vehicle information so we only get applicable toll rates.
+    vehicle: {axles: AXLES, motorcycle: MOTORCYCLE, min_occupancy: PASSENGERS},
+  };
+    
+  // *TODO*: JSON.stringify requestBody and put it into document.getElementById('outgoing')
+
+  return fetch(
+    'https://api.coord.co/v1/search/tolling/route?access_key=' + COORD_API_KEY,
+    {method: 'POST',
+     headers: {'Content-Type': 'application/json'},
+     body: JSON.stringify(requestBody)}
+  )
+  .then(function(response) { 
+    return response.json(); 
+  })
+  .then(function (tollResponse) {
+    renderTollResponse(tollResponse);
+  });
+}
+
+/**
+ * Pick which toll price to report for a given toll.
+ * Even though we only return prices for the selected kind of vehicle, there can still be different
+ * prices (for instance, for using a transponder vs. paying cash).
+ *
+ * We try to find the rate for people with no transponder. This is the cash rate if there is one,
+ * but for roads without a cash rate, we find the rate with type of 'License Plate' that costs the
+ * most, since this is what you usually get charged unless you have an account or some other special
+ * deal.
+ */
+function pickPrice(toll) {
+    var licensePlatePrice = 0;
+    for (var i = 0; i < toll.prices.length; i++) {
+        var price = toll.prices[i];
+
+        // If details is set, this rate is for specific kinds of vehicles (e.g., above a certain weight)
+        // and we should ignore it.
+        if (price.vehicle.details) {
+            continue;
+        }
+
+        // Get the actual amount (we convert it into dollars from cents).
+        var payment = price.payment;
+        var amount = price.price.amount / 100;
+
+        // Return it right away if it is a cash amount.
+        if (payment.type === 'Cash') {
+            return amount;
+        }
+        // Record it in licensePlatePrice if it is a license plate amount.
+        if (payment.type === 'License Plate' && amount > licensePlatePrice) {
+            licensePlatePrice = amount;
+        }
+    }
+    return licensePlatePrice;
+}
+
+/** Render a toll response in the 'info' div. */
+function renderTollResponse(tollResponse) {
+    // Go through all the tolls in the response to compute total cost.
+    var totalCost = 0;
+    var costs = [];
+    tollResponse.forEach(function(toll) {
+        var cost = pickPrice(toll);
+        costs.push('$' + cost.toFixed(2) + ' - ' + toll.name);
+        totalCost += cost;
+        toll.checkpoints.forEach(function(checkpoint, i) {
+          var feature = map.data.getFeatureById('toll-' + checkpoint.end.lat + '-' + checkpoint.end.lng);
+          if (feature) {
+            map.data.overrideStyle(feature, {
+              zIndex: 1,
+              icon: {
+                url:'https://coord.co/assets/toll-point-selected.png',
+                scaledSize: new google.maps.Size(12, 12),
+              },
+            });
+          }
+        });
+    });
+    headline.innerHTML = 'Total Cost: $' + totalCost.toFixed(2);
+    body.innerHTML = costs.join('<br>');
+    body.style.display = 'block';
+}
+
+/** Fetch toll locations within 50km of New York from the Coord API, returning a Promise. */
+function fetchAllTollLocations() {
+    return fetch(
+        'https://api.coord.co/v1/search/tolling/toll?latitude=40.723855&' +
+        'longitude=-73.996021&radius_km=50&access_key=' + COORD_API_KEY)
+        .then(function(response) { return response.json(); });
+}
+
+/** Render toll locations. */
+function renderTollLocations(tolls) {
+    tolls.forEach(function(toll) {
+        toll.segments.forEach(function(segment) {
+            segment.checkpoints.forEach(function(checkpoint) {
+                map.data.add(new google.maps.Data.Feature({
+                    geometry: new google.maps.Data.Point(checkpoint.end),
+                    id: "toll-" + checkpoint.end.lat + "-" + checkpoint.end.lng,
+                }));
+            })
+        })
+    });
+}
+
+/** Set the UI and global variables to their initial state. */
+function reset() {
+  origin = null;
+  destination = null;
+  // Remove all features except tolls.
+  map.data.forEach(function(feature) {
+      if (!feature.getId().includes('toll')) {
+          map.data.remove(feature);
+      }
+  });
+  if (routePolyline) {
+    routePolyline.setMap(null);
+  }
+
+  // Remove all style overrides.
+  map.data.revertStyle();
+
+  // Reset the info window.
+  headline.innerHTML = 'Click on the map to choose where to start.';
+  body.style.display = 'none';
+  warning.style.display = 'none';
+  clearElement.style.display = 'none';
+}
+    </script>
+    <script src="https://coord.co/toll-example/map-style.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fetch/2.0.3/fetch.js"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBMROACu-pmNQBh98gzstsnCrxLmzwTsBM&callback=initMap&libraries=geometry"
+    async defer></script>
+  </body>
+</html>
