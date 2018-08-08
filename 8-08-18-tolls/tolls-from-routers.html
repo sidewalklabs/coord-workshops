@@ -316,6 +316,7 @@ function computeRouteAndTolls() {
     }
     routePolyline = currentRouter.convertResponseToPolyline(route);
     runTollRequest(currentRouter.convertResponseToSteps(route));
+    headline.innerHTML = 'Switch between routers or clear and choose new a origin/destination';
   });
 }
 
